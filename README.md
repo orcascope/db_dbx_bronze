@@ -1,4 +1,4 @@
-# CHPK Propane Ingestion — SQL Server to Landing (Parquet)
+#SQL Server to Landing (Parquet)
 
 Reads tables from a **Unity Catalog foreign catalog** backed by the on-prem
 ADDS SQL Server and lands them as **Parquet files** in an ADLS Gen2 UC Volume.
