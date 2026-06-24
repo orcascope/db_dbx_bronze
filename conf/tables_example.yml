@@ -1,0 +1,77 @@
+# Per-table ingestion configuration.
+# Used as input to the optional for_each_task fan-out pattern in
+# resources/ingestion_job.yml.
+#
+# Each entry maps to one run of src/ingest_sql_to_landing.py.
+#
+# pk_columns:
+#   - Single PK     : "CustomerId"
+#   - Composite PK  : "CustomerId,AddressId"          (comma-separated, no spaces)
+#   - Composite PK  : "OrderId,LineNumber,ProductId"  (any arity)
+#
+# The script records pk_columns as metadata only (state table + _metadata.json
+# sidecar). It is not used for joins or dedup at the landing stage; Bronze
+# and Silver layers consume it for merge / SCD logic.
+
+tables:
+
+  # ---- Single-column PK, incremental load ----
+  - source_catalog: adds_sql_catalog
+    source_schema: dbo
+    source_table: Customer
+    pk_columns: "CustomerId"
+    watermark_column: ModifiedDate
+    load_type: incr
+
+  - source_catalog: adds_sql_catalog
+    source_schema: dbo
+    source_table: Tank
+    pk_columns: "TankId"
+    watermark_column: ModifiedDate
+    load_type: incr
+
+  # ---- Composite PK, incremental load ----
+  - source_catalog: adds_sql_catalog
+    source_schema: dbo
+    source_table: CustomerAddress
+    pk_columns: "CustomerId,AddressId"
+    watermark_column: ModifiedDate
+    load_type: incr
+
+  - source_catalog: adds_sql_catalog
+    source_schema: dbo
+    source_table: DeliveryLineItem
+    pk_columns: "DeliveryId,LineNumber"
+    watermark_column: ModifiedDate
+    load_type: incr
+
+  # ---- Composite PK with 3+ columns ----
+  - source_catalog: adds_sql_catalog
+    source_schema: dbo
+    source_table: TankReading
+    pk_columns: "TankId,SensorId,ReadingTimestamp"
+    watermark_column: ReadingTimestamp
+    load_type: incr
+
+  # ---- Full load (no watermark) ----
+  - source_catalog: adds_sql_catalog
+    source_schema: dbo
+    source_table: ProductCatalog
+    pk_columns: "ProductId"
+    watermark_column: ""
+    load_type: full
+
+  - source_catalog: adds_sql_catalog
+    source_schema: dbo
+    source_table: Route
+    pk_columns: "RouteId"
+    watermark_column: ""
+    load_type: full
+
+  # ---- Full load with composite PK (small reference tables) ----
+  - source_catalog: adds_sql_catalog
+    source_schema: dbo
+    source_table: PriceTier
+    pk_columns: "ProductId,TierCode,EffectiveDate"
+    watermark_column: ""
+    load_type: full

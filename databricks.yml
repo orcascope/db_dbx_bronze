@@ -1,0 +1,58 @@
+bundle:
+  name: chpk-propane-ingestion
+
+include:
+  - resources/*.yml
+
+variables:
+  source_catalog:
+    description: Unity Catalog name for the SQL Server foreign catalog
+    default: adds_sql_catalog
+
+  landing_volume:
+    description: UC Volume base path where landing Parquet files are written
+    default: /Volumes/dev_catalog/landing/raw
+
+  watermark_state_table:
+    description: UC Delta table that stores last watermark per source table
+    default: dev_catalog.ops.ingestion_watermark
+
+  cluster_node_type:
+    description: Job cluster node type
+    default: Standard_DS3_v2
+
+  cluster_spark_version:
+    description: Databricks runtime version
+    default: 15.4.x-scala2.12
+
+targets:
+
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://<dev-workspace>.azuredatabricks.net
+    variables:
+      source_catalog: adds_sql_catalog_dev
+      landing_volume: /Volumes/dev_catalog/landing/raw
+      watermark_state_table: dev_catalog.ops.ingestion_watermark
+
+  test:
+    mode: development
+    workspace:
+      host: https://<test-workspace>.azuredatabricks.net
+    variables:
+      source_catalog: adds_sql_catalog_test
+      landing_volume: /Volumes/test_catalog/landing/raw
+      watermark_state_table: test_catalog.ops.ingestion_watermark
+
+  prod:
+    mode: production
+    workspace:
+      host: https://<prod-workspace>.azuredatabricks.net
+    variables:
+      source_catalog: adds_sql_catalog
+      landing_volume: /Volumes/prod_catalog/landing/raw
+      watermark_state_table: prod_catalog.ops.ingestion_watermark
+    run_as:
+      service_principal_name: <prod-service-principal-app-id>
