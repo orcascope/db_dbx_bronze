@@ -56,11 +56,7 @@ resources:
             spark_version: ${var.cluster_spark_version}
             node_type_id: ${var.cluster_node_type}
             num_workers: 2
-            runtime_engine: PHOTON
             data_security_mode: SINGLE_USER
-            spark_conf:
-              spark.databricks.delta.optimizeWrite.enabled: "true"
-              spark.databricks.delta.autoCompact.enabled: "true"
 
       email_notifications:
         on_failure:

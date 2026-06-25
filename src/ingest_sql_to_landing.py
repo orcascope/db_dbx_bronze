@@ -128,10 +128,21 @@ def main(argv=None) -> int:
     ingestion_date = load_ts.strftime("%Y-%m-%d")
 
     src_fqn = f"`{args.source_catalog}`.`{args.source_schema}`.`{args.source_table}`"
-    landing_target = (
-        f"{args.landing_path}/{args.source_schema}/{args.source_table}"
-        f"/ingestion_date={ingestion_date}/run_id={run_id}"
-    )
+    if args.load_type == "full":
+        # Full loads land at a single "current" location and overwrite the
+        # previous snapshot on every run. No history of past full loads is
+        # retained in landing (the state table still records each run).
+        landing_target = (
+            f"{args.landing_path}/{args.source_schema}/{args.source_table}"
+            f"/load_type=full"
+        )
+    else:  # incr
+        # Incremental runs are partitioned by ingestion_date and run_id so
+        # every successful run is its own folder under landing.
+        landing_target = (
+            f"{args.landing_path}/{args.source_schema}/{args.source_table}"
+            f"/load_type=incr/ingestion_date={ingestion_date}/run_id={run_id}"
+        )
 
     print(f"[ingest] start  src={src_fqn}")
     print(f"[ingest] target {landing_target}")
@@ -144,7 +155,35 @@ def main(argv=None) -> int:
     row_count = 0
 
     try:
-        df = spark.read.table(src_fqn)
+        NUM_PARTITIONS = int(args.num_partitions)
+        pk_cols = [c.strip() for c in args.pk_columns.split(",") if c.strip()]
+
+        if NUM_PARTITIONS > 1 and pk_cols:
+            if len(pk_cols) == 1:
+                hash_expr = f"ABS(CHECKSUM([{pk_cols[0]}]))"
+            else:
+                concat = " + '||' + ".join(f"CAST([{c}] AS NVARCHAR(MAX))" for c in pk_cols)
+                hash_expr = f"ABS(CHECKSUM({concat}))"
+
+            predicates = [
+                f"{hash_expr} % {NUM_PARTITIONS} = {i}"
+                for i in range(NUM_PARTITIONS)
+            ]
+            print(f"[ingest] partitioned read with {NUM_PARTITIONS} predicates: {predicates[0]} ...")
+
+            df = spark.read.jdbc(
+                url=jdbc_url,
+                table=f"[{args.source_schema}].[{args.source_table}]",
+                predicates=predicates,
+                properties={
+                    "user":      jdbc_user,
+                    "password":  jdbc_password,
+                    "driver":    "com.microsoft.sqlserver.jdbc.SQLServerDriver",
+                    "fetchsize": "10000",
+                },
+            )
+        else:
+            df = spark.read.table(src_fqn)   # fall back to single-threaded federation read
 
         if args.load_type == "incr":
             last_wm = get_last_watermark(
