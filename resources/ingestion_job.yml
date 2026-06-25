@@ -1,54 +1,108 @@
 resources:
   jobs:
-
     propane_landing_ingestion:
       name: propane-landing-ingestion-${bundle.target}
       description: >
-        Lands one SQL Server table from the UC foreign catalog into the
-        landing Volume as Parquet files. Driven by job-level parameters,
-        so the same job definition serves every table.
-
+        Fans out a SQL Server -> Landing (Parquet) ingestion across a
+        list of tables. Each list entry carries its own
+        source_schema, source_table, pk_columns, watermark_column,
+        load_type, and num_partitions. The same python_file runs once
+        per entry with those values as CLI args.
       tags:
         team: analytics
         domain: propane
         layer: landing
         env: ${bundle.target}
-
-      # Job-level parameters become {{job.parameters.<name>}} placeholders
-      # available to the task below. Override at run time via:
-      #   databricks bundle run propane_landing_ingestion --params key=value,...
-      parameters:
-        - name: source_catalog
-          default: ${var.source_catalog}
-        - name: source_schema
-          default: dbo
-        - name: source_table
-          default: ""
-        - name: pk_columns
-          default: ""
-        - name: watermark_column
-          default: ""
-        - name: load_type
-          default: incr
-
       tasks:
-        - task_key: ingest_table
+        - task_key: ingest_all_tables
           job_cluster_key: ingest_cluster
-          spark_python_task:
-            python_file: ../src/ingest_sql_to_landing.py
-            parameters:
-              - "--source_catalog={{job.parameters.source_catalog}}"
-              - "--source_schema={{job.parameters.source_schema}}"
-              - "--source_table={{job.parameters.source_table}}"
-              - "--pk_columns={{job.parameters.pk_columns}}"
-              - "--watermark_column={{job.parameters.watermark_column}}"
-              - "--load_type={{job.parameters.load_type}}"
-              - "--landing_path=${var.landing_volume}"
-              - "--watermark_state_table=${var.watermark_state_table}"
-          libraries: []
-          timeout_seconds: 7200
-          max_retries: 1
-          min_retry_interval_millis: 60000
+          for_each_task:
+            # Maximum number of table ingestions to run in parallel on the
+            # same job cluster. Start at 2-4 raise after measuring
+            # impact with the DBA.
+            concurrency: 2
+
+            # Inline JSON array. Each object is one iteration of the inner
+            # task. Add / remove tables here -- no other file changes needed.
+            #
+            # Fields:
+            #   source_schema    : SQL Server schema (usually dbo)
+            #   source_table     : SQL Server table name
+            #   pk_columns       : single column "TankId" or composite "CustomerId,AddressId"
+            #   watermark_column : timestamp column for incr loads ("" for full)
+            #   load_type        : "incr" or "full"
+            #   num_partitions   : JDBC read parallelism (1 = single-threaded)
+            inputs: |
+              [
+                {
+                  "source_schema":    "dbo",
+                  "source_table":     "Customer",
+                  "pk_columns":       "CustomerId",
+                  "watermark_column": "ModifiedDate",
+                  "load_type":        "incr",
+                  "num_partitions":   "4"
+                },
+                {
+                  "source_schema":    "dbo",
+                  "source_table":     "Tank",
+                  "pk_columns":       "TankId",
+                  "watermark_column": "ModifiedDate",
+                  "load_type":        "incr",
+                  "num_partitions":   "4"
+                },
+                {
+                  "source_schema":    "dbo",
+                  "source_table":     "CustomerAddress",
+                  "pk_columns":       "CustomerId,AddressId",
+                  "watermark_column": "ModifiedDate",
+                  "load_type":        "incr",
+                  "num_partitions":   "4"
+                },
+                {
+                  "source_schema":    "dbo",
+                  "source_table":     "TankReading",
+                  "pk_columns":       "TankId,SensorId,ReadingTimestamp",
+                  "watermark_column": "ReadingTimestamp",
+                  "load_type":        "incr",
+                  "num_partitions":   "8"
+                },
+                {
+                  "source_schema":    "dbo",
+                  "source_table":     "ProductCatalog",
+                  "pk_columns":       "ProductId",
+                  "watermark_column": "",
+                  "load_type":        "full",
+                  "num_partitions":   "1"
+                },
+                {
+                  "source_schema":    "dbo",
+                  "source_table":     "Route",
+                  "pk_columns":       "RouteId",
+                  "watermark_column": "",
+                  "load_type":        "full",
+                  "num_partitions":   "1"
+                }
+              ]
+
+            task:
+              task_key: ingest_one
+              job_cluster_key: ingest_cluster
+              spark_python_task:
+                python_file: ../src/ingest_sql_to_landing.py
+                parameters:
+                  - "--source_catalog=${var.source_catalog}"
+                  - "--source_schema={{input.source_schema}}"
+                  - "--source_table={{input.source_table}}"
+                  - "--pk_columns={{input.pk_columns}}"
+                  - "--watermark_column={{input.watermark_column}}"
+                  - "--load_type={{input.load_type}}"
+                  - "--num_partitions={{input.num_partitions}}"
+                  - "--landing_path=${var.landing_volume}"
+                  - "--watermark_state_table=${var.watermark_state_table}"
+              libraries: []
+              timeout_seconds: 7200
+              max_retries: 1
+              min_retry_interval_millis: 60000
 
       job_clusters:
         - job_cluster_key: ingest_cluster
@@ -61,37 +115,3 @@ resources:
       email_notifications:
         on_failure:
           - data-platform-alerts@chpk.example.com
-
-# ----------------------------------------------------------------------------
-# Optional fan-out pattern (commented). To ingest many tables in a single run,
-# drive a for_each_task off a JSON array produced from conf/tables_example.yml.
-#
-# tasks:
-#   - task_key: build_table_list
-#     notebook_task:
-#       notebook_path: ../src/build_table_list   # emits JSON array as taskValue
-#       base_parameters:
-#         config_path: ../conf/tables_example.yml
-#     job_cluster_key: ingest_cluster
-#
-#   - task_key: ingest_each_table
-#     depends_on:
-#       - task_key: build_table_list
-#     for_each_task:
-#       inputs: "{{tasks.build_table_list.values.tables}}"
-#       concurrency: 4
-#       task:
-#         task_key: ingest_one
-#         job_cluster_key: ingest_cluster
-#         spark_python_task:
-#           python_file: ../src/ingest_sql_to_landing.py
-#           parameters:
-#             - "--source_catalog={{input.source_catalog}}"
-#             - "--source_schema={{input.source_schema}}"
-#             - "--source_table={{input.source_table}}"
-#             - "--pk_columns={{input.pk_columns}}"
-#             - "--watermark_column={{input.watermark_column}}"
-#             - "--load_type={{input.load_type}}"
-#             - "--landing_path=${var.landing_volume}"
-#             - "--watermark_state_table=${var.watermark_state_table}"
-# ----------------------------------------------------------------------------
