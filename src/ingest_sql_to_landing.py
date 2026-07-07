@@ -51,6 +51,8 @@ def parse_args(argv=None):
                    help="Timestamp column used for incremental loads")
     p.add_argument("--load_type", required=True, choices=["full", "incr"],
                    help="Load type: full or incr")
+    p.add_argument("--num_partitions", required=False, default="1",
+                   help="JDBC read parallelism (1 = single-threaded federation read)")
     p.add_argument("--landing_path", required=True,
                    help="UC Volume base path for landing parquet files")
     p.add_argument("--watermark_state_table", required=True,

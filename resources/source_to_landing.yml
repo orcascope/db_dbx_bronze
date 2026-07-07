@@ -1,7 +1,31 @@
+# =============================================================================
+# Pipeline layer: SOURCE (SQL Server) -> LANDING (Parquet)
+# Script: ../src/ingest_sql_to_landing.py
+#
+# This file governs the source->landing job on its own: all knobs and every
+# per-environment override live here, NOT in databricks.yml. The landing->bronze
+# script gets its own sibling file (e.g. landing_to_bronze.yml) with the same
+# self-contained shape.
+#
+# Env-varying knobs are bundle variables (prefixed `landing_` so they don't
+# collide with other job files) overridden per target at the bottom. DAB appends
+# arrays on override, so env values must come through variables — not by
+# re-listing the parameters array per target. Per-table knobs stay in the
+# for_each `inputs` list; cluster sizing is inlined literally.
+# =============================================================================
+
+variables:
+  landing_source_catalog:        { description: UC foreign catalog for SQL Server, default: adds_sql_catalog }
+  landing_volume_path:           { description: Landing volume base path,          default: /Volumes/prod_catalog/landing/raw }
+  landing_watermark_state_table: { description: Watermark state Delta table,        default: prod_catalog.ops.ingestion_watermark }
+  landing_kv_secret_name_url:    { description: Secret name for JDBC URL,           default: adds-sql-jdbc-url }
+  landing_kv_secret_name_uid:    { description: Secret name for user id,            default: adds-sql-uid }
+  landing_kv_secret_name_pwd:    { description: Secret name for password,           default: adds-sql-pwd }
+
 resources:
   jobs:
-    propane_landing_ingestion:
-      name: propane-landing-ingestion-${bundle.target}
+    propane_source_to_landing:
+      name: propane-source-to-landing-${bundle.target}
       description: >
         Fans out a SQL Server -> Landing (Parquet) ingestion across a
         list of tables. Each list entry carries its own
@@ -90,18 +114,20 @@ resources:
               spark_python_task:
                 python_file: ../src/ingest_sql_to_landing.py
                 parameters:
-                  - "--source_catalog=${var.source_catalog}"
-                  - "--kv_secret_name_url=${var.kv_secret_name_url}"
-                  - "--kv_secret_name_uid=${var.kv_secret_name_uid}"
-                  - "--kv_secret_name_pwd=${var.kv_secret_name_pwd}"
+                  # --- env-varying knobs (bundle variables, overridden per target) ---
+                  - "--source_catalog=${var.landing_source_catalog}"
+                  - "--kv_secret_name_url=${var.landing_kv_secret_name_url}"
+                  - "--kv_secret_name_uid=${var.landing_kv_secret_name_uid}"
+                  - "--kv_secret_name_pwd=${var.landing_kv_secret_name_pwd}"
+                  - "--landing_path=${var.landing_volume_path}"
+                  - "--watermark_state_table=${var.landing_watermark_state_table}"
+                  # --- per-table knobs (from the for_each inputs above) ---
                   - "--source_schema={{input.source_schema}}"
                   - "--source_table={{input.source_table}}"
                   - "--pk_columns={{input.pk_columns}}"
                   - "--watermark_column={{input.watermark_column}}"
                   - "--load_type={{input.load_type}}"
                   - "--num_partitions={{input.num_partitions}}"
-                  - "--landing_path=${var.landing_volume}"
-                  - "--watermark_state_table=${var.watermark_state_table}"
               libraries: []
               timeout_seconds: 7200
               max_retries: 1
@@ -110,11 +136,40 @@ resources:
       job_clusters:
         - job_cluster_key: ingest_cluster
           new_cluster:
-            spark_version: ${var.cluster_spark_version}
-            node_type_id: ${var.cluster_node_type}
+            spark_version: 15.4.x-scala2.12
+            node_type_id: Standard_DS3_v2
             num_workers: 2
             data_security_mode: SINGLE_USER
 
       email_notifications:
         on_failure:
           - data-platform-alerts@chpk.example.com
+
+# --- Per-environment overrides, governed in THIS file (not databricks.yml) ---
+targets:
+  dev:
+    variables:
+      landing_source_catalog:        adds_sql_catalog_dev
+      landing_volume_path:           /Volumes/dev_catalog/landing/raw
+      landing_watermark_state_table: dev_catalog.ops.ingestion_watermark
+      landing_kv_secret_name_url:    adds-sql-url-dev
+      landing_kv_secret_name_uid:    adds-sql-uid-dev
+      landing_kv_secret_name_pwd:    adds-sql-pwd-dev
+
+  test:
+    variables:
+      landing_source_catalog:        adds_sql_catalog_test
+      landing_volume_path:           /Volumes/test_catalog/landing/raw
+      landing_watermark_state_table: test_catalog.ops.ingestion_watermark
+      landing_kv_secret_name_url:    adds-sql-jdbc-url-test
+      landing_kv_secret_name_uid:    adds-sql-uid-test
+      landing_kv_secret_name_pwd:    adds-sql-pwd-test
+
+  prod:
+    variables:
+      landing_source_catalog:        adds_sql_catalog
+      landing_volume_path:           /Volumes/prod_catalog/landing/raw
+      landing_watermark_state_table: prod_catalog.ops.ingestion_watermark
+      landing_kv_secret_name_url:    adds-sql-jdbc-url
+      landing_kv_secret_name_uid:    adds-sql-uid
+      landing_kv_secret_name_pwd:    adds-sql-pwd
