@@ -91,6 +91,9 @@ resources:
                 python_file: ../src/ingest_sql_to_landing.py
                 parameters:
                   - "--source_catalog=${var.source_catalog}"
+                  - "--kv_secret_name_url=${var.kv_secret_name_url}"
+                  - "--kv_secret_name_uid=${var.kv_secret_name_uid}"
+                  - "--kv_secret_name_pwd=${var.kv_secret_name_pwd}"
                   - "--source_schema={{input.source_schema}}"
                   - "--source_table={{input.source_table}}"
                   - "--pk_columns={{input.pk_columns}}"

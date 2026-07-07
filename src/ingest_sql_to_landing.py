@@ -35,6 +35,12 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(description="SQL Server -> Landing Parquet ingestion")
     p.add_argument("--source_catalog", required=True,
                    help="UC foreign catalog name for SQL Server (e.g. adds_sql_catalog)")
+    p.add_argument("--kv_secret_name_url", required=True,
+                   help="Secret name (key) holding the SQL Server JDBC URL")
+    p.add_argument("--kv_secret_name_uid", required=True,
+                   help="Secret name (key) holding the SQL Server login / user id")
+    p.add_argument("--kv_secret_name_pwd", required=True,
+                   help="Secret name (key) holding the SQL Server password")
     p.add_argument("--source_schema", required=True,
                    help="Source schema name (e.g. dbo)")
     p.add_argument("--source_table", required=True,

@@ -17,6 +17,18 @@ variables:
     description: UC Delta table that stores last watermark per source table
     default: dev_catalog.ops.ingestion_watermark
 
+  kv_secret_name_url:
+    description: Secret name (key) holding the SQL Server JDBC URL
+    default: adds-sql-jdbc-url
+
+  kv_secret_name_uid:
+    description: Secret name (key) holding the SQL Server login / user id
+    default: adds-sql-uid
+
+  kv_secret_name_pwd:
+    description: Secret name (key) holding the SQL Server password
+    default: adds-sql-pwd
+
   cluster_node_type:
     description: Job cluster node type
     default: Standard_DS3_v2
@@ -36,6 +48,9 @@ targets:
       source_catalog: adds_sql_catalog_dev
       landing_volume: /Volumes/dev_catalog/landing/raw
       watermark_state_table: dev_catalog.ops.ingestion_watermark
+      kv_secret_name_url: adds-sql-jdbc-url-dev
+      kv_secret_name_uid: adds-sql-uid-dev
+      kv_secret_name_pwd: adds-sql-pwd-dev
 
   test:
     mode: development
@@ -45,6 +60,9 @@ targets:
       source_catalog: adds_sql_catalog_test
       landing_volume: /Volumes/test_catalog/landing/raw
       watermark_state_table: test_catalog.ops.ingestion_watermark
+      kv_secret_name_url: adds-sql-jdbc-url-test
+      kv_secret_name_uid: adds-sql-uid-test
+      kv_secret_name_pwd: adds-sql-pwd-test
 
   prod:
     mode: production
@@ -54,5 +72,8 @@ targets:
       source_catalog: adds_sql_catalog
       landing_volume: /Volumes/prod_catalog/landing/raw
       watermark_state_table: prod_catalog.ops.ingestion_watermark
+      kv_secret_name_url: adds-sql-jdbc-url
+      kv_secret_name_uid: adds-sql-uid
+      kv_secret_name_pwd: adds-sql-pwd
     run_as:
       service_principal_name: <prod-service-principal-app-id>
