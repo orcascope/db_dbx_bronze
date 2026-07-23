@@ -1,18 +1,43 @@
+"""
+Pull tank-level readings from the odata DataService REST API and store the raw
+JSON pages in the landing zone. Plain Python — no Spark.
+
+Source API:
+  GET {base}/devices/{id}/tanklevels?startDateUtc={iso}&endDateUtc={iso}&page={n}
+
+Auth:
+  API key sent as an HTTP header  ->  Authorization: Bearer <key>
+  Read from the ODATA_API_KEY environment variable. On Databricks, wire that
+  env var to a secret in the job config (no dbutils needed), e.g.
+    ODATA_API_KEY: {{secrets/<scope>/odata-api-key}}
+
+Paging:
+  The API caps each page at 10000 readings and exposes no total-count field, so
+  we page from index 0 upward and stop when a page returns fewer than page_size
+  readings (a short or empty page = the last page). --max_pages is a safety cap.
+
+Server failover:
+  --api_base_urls is an ordered, comma-separated list (primary first). Each
+  request tries the servers in order; transient failures (connect errors, 5xx,
+  429) fall through to the next server. Auth (401/403) and bad-request (400/404)
+  responses fail fast.
+
+Output:
+  One raw JSON file per page, overwriting any prior pages for the same device:
+    {landing_path}/{source_schema}/{source_table}/device_id={device_id}/page=NNNNN.json
+"""
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import sys
-import uuid
 from datetime import datetime, timezone
 
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-
-from pyspark.sql import SparkSession
-from pyspark.sql import functions as F
 
 
 # API hard limit: max readings returned per page (documented).
@@ -32,7 +57,7 @@ DEFAULT_BASE_URLS = ",".join([
 # ---------------------------------------------------------------------------
 
 def parse_args(argv=None):
-    p = argparse.ArgumentParser(description="odata API -> Landing Parquet ingestion")
+    p = argparse.ArgumentParser(description="odata API -> Landing (raw JSON) ingestion")
     p.add_argument("--source_schema", required=False, default="odata",
                    help="Logical schema for the landing layout (default: odata)")
     p.add_argument("--source_table", required=False, default="tanklevels",
@@ -45,12 +70,8 @@ def parse_args(argv=None):
                    help="Device id for the /devices/{id}/tanklevels path")
     p.add_argument("--api_base_urls", required=False, default=DEFAULT_BASE_URLS,
                    help="Comma-separated DataService.svc base URLs, primary first")
-    p.add_argument("--kv_scope", required=False, default="",
-                   help="Databricks secret scope holding the API key")
-    p.add_argument("--kv_secret_name_apikey", required=False, default="odata-api-key",
-                   help="Secret key name for the odata API key")
     p.add_argument("--landing_path", required=True,
-                   help="UC Volume base path for landing parquet files")
+                   help="Base path for the landing JSON files")
     p.add_argument("--request_timeout", required=False, default="60",
                    help="Per-request timeout in seconds (default: 60)")
     p.add_argument("--max_pages", required=False, default="10000",
@@ -81,33 +102,16 @@ def fmt_api(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime(_API_FMT)
 
 
-def to_naive_utc(dt: datetime) -> datetime:
-    """Strip tzinfo for the Spark TIMESTAMP audit columns."""
-    return dt.astimezone(timezone.utc).replace(tzinfo=None)
-
-
 # ---------------------------------------------------------------------------
-# Secret / dbutils helpers
+# Auth
 # ---------------------------------------------------------------------------
 
-def get_api_key(spark: SparkSession, scope: str, key_name: str) -> str:
-    """Resolve the API key: env override first (local dev), else Databricks secret."""
-    env = os.environ.get("odata_API_KEY")
-    if env:
-        return env.strip()
-    if not scope:
-        raise RuntimeError(
-            "No API key: set odata_API_KEY, or pass --kv_scope with a Databricks "
-            "secret scope containing --kv_secret_name_apikey."
-        )
-    try:
-        from pyspark.dbutils import DBUtils  # available on Databricks clusters
-        dbutils = DBUtils(spark)
-        return dbutils.secrets.get(scope=scope, key=key_name)
-    except Exception as exc:  # noqa: BLE001 — surface a clear, actionable message
-        raise RuntimeError(
-            f"Could not read API key from secret {scope}/{key_name}: {exc}"
-        ) from exc
+def get_api_key() -> str:
+    """Read the API key from the ODATA_API_KEY environment variable."""
+    key = os.environ.get("ODATA_API_KEY", "").strip()
+    if not key:
+        raise RuntimeError("ODATA_API_KEY is not set (env var holding the odata API key)")
+    return key
 
 
 # ---------------------------------------------------------------------------
@@ -161,26 +165,40 @@ def http_get_json(session, base_urls, path, params, headers, timeout):
     raise RuntimeError(f"All servers failed for {path}: {last_err}")
 
 
-def fetch_all_readings(session, base_urls, path, base_params, headers, timeout, max_pages):
-    """Page from index 0 until a short/empty page is returned (last-page signal).
-    Each page's JSON payload is the readings array. Returns
-    (readings_list, pages_fetched)."""
-    readings = []
+# ---------------------------------------------------------------------------
+# Landing
+# ---------------------------------------------------------------------------
+
+def prepare_landing_dir(landing_target: str) -> None:
+    """Create the target dir and remove any page files from a previous run."""
+    os.makedirs(landing_target, exist_ok=True)
+    for old in glob.glob(f"{landing_target}/page=*.json"):
+        os.remove(old)
+
+
+def fetch_and_store(session, base_urls, path, base_params, headers,
+                    timeout, max_pages, landing_target):
+    """Page from index 0, writing each page's raw JSON to its own file, until a
+    short/empty page is returned. Returns (total_readings, pages_written)."""
+    total = 0
     page = 0
     while page < max_pages:
         params = dict(base_params, page=page)
         payload = http_get_json(session, base_urls, path, params, headers, timeout)
-        batch = payload
-        got = len(batch)
-        readings.extend(batch)
-        print(f"[odata] page={page} readings={got} (running total={len(readings)})")
+        got = len(payload)
+
+        with open(f"{landing_target}/page={page:05d}.json", "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+
+        total += got
+        print(f"[odata] page={page} readings={got} (running total={total})")
 
         if got < PAGE_SIZE:                    # short or empty page = last page
-            return readings, page + 1
+            return total, page + 1
         page += 1
 
     print(f"[odata] hit --max_pages={max_pages}; stopping (there may be more data)")
-    return readings, page
+    return total, page
 
 
 # ---------------------------------------------------------------------------
@@ -194,18 +212,7 @@ def main(argv=None) -> int:
     if not base_urls:
         raise ValueError("--api_base_urls resolved to an empty list")
 
-    spark = (
-        SparkSession.builder
-        .appName(f"odata-ingest-{args.source_schema}.{args.source_table}")
-        .getOrCreate()
-    )
-
-    run_id = str(uuid.uuid4())
-    load_ts = datetime.now(timezone.utc).replace(tzinfo=None)
-
     # ---- Resolve the [start, end] window (caller-supplied every run) ---------
-    if not args.start_date_utc:
-        raise ValueError("--start_date_utc is required")
     start_dt = parse_iso_utc(args.start_date_utc)
     end_dt = parse_iso_utc(args.end_date_utc) if args.end_date_utc \
         else datetime.now(timezone.utc)
@@ -218,53 +225,30 @@ def main(argv=None) -> int:
         "startDateUtc": fmt_api(start_dt),
         "endDateUtc":   fmt_api(end_dt),
     }
-    api_key = get_api_key(spark, args.kv_scope, args.kv_secret_name_apikey)
     headers = {
         "Accept": "application/json; charset=utf-8",
-        "Authorization": f"Bearer {api_key}",
+        "Authorization": f"Bearer {get_api_key()}",
     }
 
-    landing_target = f"{args.landing_path}/{args.source_schema}/{args.source_table}"
+    landing_target = (
+        f"{args.landing_path}/{args.source_schema}/{args.source_table}"
+        f"/device_id={args.device_id}"
+    )
 
     print(f"[odata] start  table={args.source_schema}.{args.source_table}  device={args.device_id}")
     print(f"[odata] window {base_params['startDateUtc']} .. {base_params['endDateUtc']}")
     print(f"[odata] target {landing_target}")
 
+    prepare_landing_dir(landing_target)
+
     session = build_session()
-    readings, pages = fetch_all_readings(
+    total, pages = fetch_and_store(
         session, base_urls, path, base_params, headers,
         timeout=int(args.request_timeout), max_pages=int(args.max_pages),
-    )
-    row_count = len(readings)
-    print(f"[odata] fetched {row_count} readings across {pages} page(s)")
-
-    if row_count == 0:
-        print("[odata] no readings in window — nothing to land")
-        return 0
-
-    # Shape JSON readings -> DataFrame via Spark's JSON reader (robust to nested
-    # objects), then land as parquet (overwrite) like the SQL ingestion.
-    json_lines = [json.dumps(r, default=str) for r in readings]
-    rdd = spark.sparkContext.parallelize(json_lines)
-    df = spark.read.json(rdd)
-
-    df = (
-        df
-        .withColumn("_ingest_run_id",       F.lit(run_id))
-        .withColumn("_ingest_load_ts",      F.lit(load_ts))
-        .withColumn("_ingest_source",       F.lit(f"odata.{args.source_table}"))
-        .withColumn("_ingest_window_start", F.lit(to_naive_utc(start_dt)))
-        .withColumn("_ingest_window_end",   F.lit(to_naive_utc(end_dt)))
+        landing_target=landing_target,
     )
 
-    (
-        df.write
-          .mode("overwrite")
-          .format("parquet")
-          .save(landing_target)
-    )
-
-    print(f"[odata] SUCCESS  rows={row_count}  pages={pages}  target={landing_target}")
+    print(f"[odata] SUCCESS  readings={total}  pages={pages}  target={landing_target}")
     return 0
 
 
